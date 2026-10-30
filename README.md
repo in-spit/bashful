@@ -3,7 +3,7 @@
 <div>
     <img src="https://skillicons.dev/icons?i=arch,bash,github,obsidian"/>
 </div>
-Shell is a chat service that is being built to give you another way of communication via the terminal on both windows and linux.
+Bashfull is a CLI-based chat service that is being built to give you another way of communication via the terminal on both windows and linux.
 The initial idea stemmed from whatsapp being dookie right now with all the tracking and AI use, so bashful was made. 
 
 ## DEPENDENCIES
