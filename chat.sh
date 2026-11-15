@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bash client for the Bashful store-and-forward server.
+# Bash client for the Bashful store-and-forward server
 # Requires Bash 4+, OpenSSL 3+, and standard Unix text/file utilities.
 
 set -u
