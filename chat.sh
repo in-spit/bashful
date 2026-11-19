@@ -3,11 +3,11 @@
 # Requires Bash 4+, OpenSSL 3+, and standard Unix text/file utilities.
 
 # Use predictable error handling and restrict permissions on created files.
-set -u
+set -uo pipefail
 umask 077
 
 # Print an error and stop the program.
-die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+die() { printf '\nerror: %s\n' "$*" >&2; exit 1; }
 
 # Display supported options and commands, then exit with the requested status.
 usage() {
@@ -56,7 +56,7 @@ if (( $# == 0 )); then
   while :; do
     echo
     echo "Chat client"
-    echo "1) Connect to the central server"
+    echo "1) Connect to server"
     echo "2) Show command-line help"
     echo "3) Exit"
     if ! read -r -p "Choose an option: " menu_choice; then
@@ -94,7 +94,7 @@ if (( ! LOGO_SHOWN )); then
 fi
 
 # Create temporary working files and remove them when the program exits.
-T=$(mktemp -d) || die "could not create temporary directory"
+T=$(mktemp -d) || die "Failed to create temporary directory"
 TLS_PID=""
 cleanup() {
   trap - EXIT INT TERM
@@ -107,7 +107,7 @@ trap 'exit 143' TERM
 trap '' PIPE
 
 # Prepare the private directory and stable certificate-pin filename.
-mkdir -p "$DATA_DIR/pins" || die "could not create $DATA_DIR/pins"
+mkdir -p "$DATA_DIR/pins" || die "Failed to create $DATA_DIR/pins"
 chmod 700 "$DATA_DIR" "$DATA_DIR/pins" 2>/dev/null || :
 PIN_FILE=$DATA_DIR/pins/$(printf '%s:%s' "$SERVER_HOST" "$SERVER_PORT" | openssl dgst -sha256 | sed 's/^.*= *//').pem
 
@@ -153,18 +153,18 @@ pin_server() {
     -servername "$SERVER_HOST" -showcerts </dev/null 2>"$T/cert.err" \
     | sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' \
     | awk 'BEGIN{n=0} /-----BEGIN CERTIFICATE-----/{n++} n==1{print}' > "$T/server.pem"
-  [[ -s $T/server.pem ]] || die "could not retrieve the server certificate ($(tr '\n' ' ' < "$T/cert.err"))"
+  [[ -s $T/server.pem ]] || die "yo fuckface your connection refused ($(tr '\n' ' ' < "$T/cert.err"))"
   local der fp grouped answer
   der=$T/server.der
   openssl x509 -in "$T/server.pem" -outform DER -out "$der" 2>/dev/null \
-    || die "server did not present a valid certificate"
+    || die "what the actual FUCK did you do for this error, invalid server certificate?"
   fp=$(sha256 "$der")
   grouped=""
   local i
   for ((i=0; i<${#fp}; i+=4)); do grouped+="${fp:i:4} "; done
   grouped=${grouped% }
   printf '\nServer certificate SHA-256 fingerprint:\n%s\n' "$grouped"
-  echo "Compare this with the fingerprint printed by the server operator."
+  echo "Compare this with the fingerprint printed by the server operator, oh wait, you dont know the guy, fuck you."
   read -r -p "Trust and pin this certificate? [y/N] " answer || die "no input"
   [[ $answer == [yY]* ]] || die "server certificate not trusted"
   install -m 600 "$T/server.pem" "$PIN_FILE" 2>/dev/null || cp "$T/server.pem" "$PIN_FILE"
@@ -175,6 +175,7 @@ pin_server() {
 pin_server
 coproc TLS { exec openssl s_client -quiet -connect "$SERVER_HOST:$SERVER_PORT" \
   -servername "$SERVER_HOST" -CAfile "$PIN_FILE" -verify_return_error 2>/dev/null; }
+TLS_PID=$!
 exec 3<&"${TLS[0]}" 4>&"${TLS[1]}" || die "could not start TLS connection"
 
 FRAME=""
@@ -199,7 +200,12 @@ read_frame() {
   (( ${#FRAME} <= 262144 )) || die "server frame exceeds 256 KiB"
   [[ $FRAME == \{* ]] || die "server sent an invalid frame"
 }
-read_frame 15 || die "server disconnected during TLS handshake"
+read_frame 15 || {
+  if (( READ_STATUS == 1 || READ_STATUS <= 128)); then
+    die "server disconnected during TLS handshake"
+  fi
+  die "server did not respond during TLS handshake"
+}
 [[ $(json_field t "$FRAME") == hello && $(json_number v "$FRAME") == 1 ]] \
   || die "server does not speak protocol version 1"
 NEEDS_INVITE=$(sed -n 's/.*"invite":\(true\|false\).*/\1/p' <<<"$FRAME")
@@ -437,7 +443,11 @@ request() {
       *) : ;;
     esac
   done
-  LAST_ERROR="server disconnected or timed out"
+  if (( READ_STATUS == 1 || READ_STATUS <= 128)); then
+    LAST_ERROR="server disconnected"
+  else
+    LAST_ERROR="server timed out"
+  fi
   return 1
 }
 
@@ -698,7 +708,7 @@ while (( ! EXIT_REQUESTED )); do
     die "server disconnected"
   fi
   INPUT=""
-  if read -r -e -i "$PENDING_INPUT" -t 1 -p "chat> " INPUT; then
+  if read -r -e -i "$PENDING_INPUT" -t 10 -p "chat> " INPUT; then
     PENDING_INPUT=""
     run_command "$INPUT"
   else
