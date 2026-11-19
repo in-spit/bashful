@@ -14,57 +14,17 @@ for windows, please install the latest version of [nmap](https://nmap.org/downlo
 
 Bashful uses a client/server setup: start the server on one computer, then run
 the Bash client on any computer that can reach it. Messages are encrypted by
-the client before being sent to the server.
+the client before being sent to the server. See
+[server_instructions.md](server_instructions.md) for server setup and operation.
 
-## Requirements
+## Client requirements
 
-The server needs Python 3.10 or newer. The client needs Bash 4 or newer,
-OpenSSL 3.x, and common Unix command-line utilities.
+The client needs Bash 4 or newer, OpenSSL 3.x, and common Unix command-line
+utilities.
 
-- On Windows, use Git Bash for the client and install Python for the server.
-  Check `openssl version` in Git Bash; it must report OpenSSL 3.x.
-- On Linux, install Bash, OpenSSL 3.x, and Python 3.10+ using your
-  distribution's package manager.
-
-## Start the server
-
-From the repository root, install the server dependency and start the server:
-
-```bash
-cd server
-python -m pip install -r requirements.txt
-python server.py
-```
-
-By default, the server listens on port `7443` on all network interfaces and
-stores its database and TLS certificate in `server/chat-data/`. Keep this
-directory: it contains the accounts, messages, and certificate. Removing or
-replacing it resets the server identity and data.
-
-The server prints its SHA-256 certificate fingerprint when it starts. Share
-that fingerprint with users over a trusted channel so they can verify the
-server on their first connection.
-
-To require an invite code for new registrations, start the server with:
-
-```bash
-python server.py --invite-code YOUR_INVITE_CODE
-```
-
-If clients connect from another computer, allow inbound TCP traffic on port
-`7443` through the server machine's firewall. For connections over the
-internet, the server must also be reachable at a public hostname or IP address;
-configure router port forwarding if the server is behind a router. Do not
-expose the port unless you intend to let others reach the service.
-
-Optional server settings:
-
-```text
---host ADDRESS       Listen address (default: 0.0.0.0)
---port PORT          Listen port (default: 7443)
---data DIRECTORY     Database and certificate directory (default: chat-data)
---invite-code CODE   Require this code to register accounts
-```
+- On Windows, use Git Bash and check that `openssl version` reports OpenSSL 3.x.
+- On Linux, install Bash, OpenSSL 3.x, and common Unix command-line utilities
+  using your distribution's package manager.
 
 ## Connect with the Bashful client
 
@@ -117,5 +77,4 @@ different local data directory with `--data-dir` and prefill the username with
 ./chat.sh --username alice --data-dir "$HOME/.bashful"
 ```
 
-See [server/PROTOCOL.md](server/PROTOCOL.md) for protocol details and
-server-operation guidance.
+See [server/PROTOCOL.md](server/PROTOCOL.md) for protocol details.
