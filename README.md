@@ -20,7 +20,7 @@ the client before being sent to the server. See
 ## Client requirements
 
 The client needs Bash 4 or newer, OpenSSL 3.x, and common Unix command-line
-utilities.
+utilities. No Python client dependency is required.
 
 - On Windows, use Git Bash and check that `openssl version` reports OpenSSL 3.x.
 - On Linux, install Bash, OpenSSL 3.x, and common Unix command-line utilities
@@ -28,15 +28,24 @@ utilities.
 
 ## Connect with the Bashful client
 
-The client uses the central server configured in `chat.sh` at
-`77.172.104.230:7443`. From the repository, start the interactive menu:
+The client uses the server configured in `chat.sh` at `77.172.104.230:7443`.
+From the repository, start the client:
 
 ```bash
 ./chat.sh
 ```
 
-Choose **Connect to the central server**. You can also start a connection
-directly from the command line:
+After signing in, select a previous chat by number or choose **New chat** and
+enter a registered username. In a conversation, type a message and press Enter
+to send it; use `/back` to return to the chat list. Use **Commands** for room
+management, trust controls, and other client commands.
+
+Messages are queued by the server while the recipient is offline and delivered
+when they reconnect. The server does not keep a history after messages are
+acknowledged, so the client stores conversation history locally.
+
+You can prefill the username and choose a local data directory from the
+command line:
 
 ```bash
 ./chat.sh --username alice
@@ -58,15 +67,6 @@ new account, or **login** to use an existing account. Usernames are 1–32
 letters, digits, underscores, or hyphens. If the server requires invitations,
 enter the invite code when prompted during registration. Keep your password:
 there is no password reset or account recovery.
-
-Once connected, type `help` to see client commands. For example:
-
-```text
-dm USER MESSAGE
-history
-rooms
-quit
-```
 
 The client keeps local account keys and certificate pins under
 `$HOME/.e2e-chat` by default. Keep this directory private. You can choose a

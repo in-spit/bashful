@@ -41,7 +41,7 @@ EOF
 }
 
 # Check that the required tools and cryptographic library are available.
-for command in openssl sed awk od base64 dd mktemp tail tr wc grep date timeout cat; do
+for command in openssl sed awk od base64 dd mktemp tail tr wc grep date timeout cat sort sleep; do
   command -v "$command" >/dev/null 2>&1 || die "required command not found: $command"
 done
 (( BASH_VERSINFO[0] >= 4 )) || die "Bash 4 or newer is required"
@@ -96,8 +96,13 @@ fi
 # Create temporary working files and remove them when the program exits.
 T=$(mktemp -d) || die "Failed to create temporary directory"
 TLS_PID=""
+KEEPALIVE_PID=""
 cleanup() {
   trap - EXIT INT TERM
+  if [[ -n $KEEPALIVE_PID ]]; then
+    kill "$KEEPALIVE_PID" 2>/dev/null
+    wait "$KEEPALIVE_PID" 2>/dev/null || :
+  fi
   [[ -n $TLS_PID ]] && kill "$TLS_PID" 2>/dev/null
   rm -rf "$T"
 }
@@ -690,29 +695,177 @@ run_command() {
 }
 
 EXIT_REQUESTED=0
-LAST_PING=$(date +%s)
-PENDING_INPUT=""
-# Keep the connection alive, process incoming frames, and read user commands.
-echo "Connected as $USERNAME. Type help for commands."
-while (( ! EXIT_REQUESTED )); do
-  now=$(date +%s)
-  if (( now - LAST_PING >= 60 )); then
-    request ping || die "$LAST_ERROR"
-    LAST_PING=$now
+INPUT_STATUS=0
+MODE=chats
+CURRENT_CHAT=""
+CHAT_PEERS=()
+SCREEN_DIRTY=1
+
+# Keep the server session active without interrupting the user's input prompt.
+keepalive_loop() {
+  while :; do
+    sleep 60
+    printf '{"t":"ping","id":"keepalive"}\n' >&4 || return
+  done
+}
+keepalive_loop &
+KEEPALIVE_PID=$!
+
+# Read one complete line; the prompt stays active until the user submits it.
+read_input() {
+  local prompt=$1
+  INPUT=""
+  if IFS= read -r -e -p "$prompt" INPUT; then
+    INPUT_STATUS=0
+    return 0
   fi
+  INPUT_STATUS=2
+  return 2
+}
+
+# Build the direct-chat list from known contacts and locally saved messages.
+load_chat_list() {
+  : > "$T/chat-list"
+  if [[ -f $PROFILE/contacts ]]; then
+    awk -v me="$USERNAME" '$1 != me && $1 != "" {print $1}' "$PROFILE/contacts" >> "$T/chat-list"
+  fi
+  if [[ -f $PROFILE/history ]]; then
+    awk -F '\t' -v me="$USERNAME" '$4 == "dm" && $3 != me && $3 != "" {print $3}' \
+      "$PROFILE/history" >> "$T/chat-list"
+  fi
+  sort -u "$T/chat-list" -o "$T/chat-list"
+  mapfile -t CHAT_PEERS < "$T/chat-list"
+}
+
+# Keep the connection alive and handle messages between user input lines.
+echo "Connected as $USERNAME. Select a chat, or choose New chat."
+while (( ! EXIT_REQUESTED )); do
   # Handle incoming frames while waiting for input.
   if read_frame 0.2; then
     handle_push "$FRAME"
+    [[ $MODE == chats ]] && SCREEN_DIRTY=1
     continue
   elif (( READ_STATUS <= 128 )); then
     die "server disconnected"
   fi
-  INPUT=""
-  if read -r -e -i "$PENDING_INPUT" -t 10 -p "chat> " INPUT; then
-    PENDING_INPUT=""
-    run_command "$INPUT"
-  else
-    PENDING_INPUT=${INPUT:-$PENDING_INPUT}
+
+  if (( SCREEN_DIRTY )); then
+    case $MODE in
+      chats)
+        load_chat_list
+        echo
+        echo "Chats"
+        if (( ${#CHAT_PEERS[@]} )); then
+          for i in "${!CHAT_PEERS[@]}"; do
+            printf '%d) %s\n' "$((i + 1))" "${CHAT_PEERS[i]}"
+          done
+        else
+          echo "No previous chats."
+        fi
+        echo "n) New chat"
+        echo "c) Commands (rooms, trust, account tools)"
+        echo "q) Quit"
+        ;;
+      chat)
+        echo
+        echo "Chat with $CURRENT_CHAT  (type /back to return)"
+        history "$CURRENT_CHAT"
+        ;;
+      new)
+        echo
+        echo "Start a direct chat with a registered username (or /back)."
+        ;;
+      commands)
+        echo
+        echo "Commands mode. Type help for commands, or back to return to chats."
+        ;;
+    esac
+    SCREEN_DIRTY=0
   fi
+
+  prompt="chats> "
+  case $MODE in
+    chat) prompt="$CURRENT_CHAT> " ;;
+    new) prompt="username> " ;;
+    commands) prompt="commands> " ;;
+  esac
+  read_input "$prompt"
+  input_result=$?
+  if (( input_result == 2 )); then
+    EXIT_REQUESTED=1
+    continue
+  fi
+
+  case $MODE in
+    chats)
+      case ${INPUT,,} in
+        q|quit|exit) EXIT_REQUESTED=1 ;;
+        n|new) MODE=new; SCREEN_DIRTY=1 ;;
+        c|commands) MODE=commands; SCREEN_DIRTY=1 ;;
+        *)
+          if [[ $INPUT =~ ^[0-9]{1,9}$ ]]; then
+            selection=$((10#$INPUT))
+            if (( selection >= 1 && selection <= ${#CHAT_PEERS[@]} )); then
+              CURRENT_CHAT=${CHAT_PEERS[selection-1]}
+              MODE=chat
+              SCREEN_DIRTY=1
+            else
+              echo "Choose a listed chat, n, c, or q."
+            fi
+          else
+            echo "Choose a listed chat, n, c, or q."
+          fi
+          ;;
+      esac
+      ;;
+    new)
+      if [[ ${INPUT,,} == /back || ${INPUT,,} == back ]]; then
+        MODE=chats
+        SCREEN_DIRTY=1
+      elif ! valid_user "${INPUT,,}"; then
+        echo "Username must be 1-32 letters, digits, _ or -."
+      elif [[ ${INPUT,,} == "$USERNAME" ]]; then
+        echo "You cannot start a chat with yourself."
+      else
+        CURRENT_CHAT=${INPUT,,}
+        MODE=chat
+        SCREEN_DIRTY=1
+      fi
+      ;;
+    chat)
+      case ${INPUT,,} in
+        /back|back)
+          CURRENT_CHAT=""
+          MODE=chats
+          SCREEN_DIRTY=1
+          ;;
+        /help|help)
+          echo "Type a message and press Enter to send. Use /back to return to chats."
+          ;;
+        /history)
+          history "$CURRENT_CHAT"
+          ;;
+        "")
+          ;;
+        *)
+          send_dm "$CURRENT_CHAT" "$INPUT"
+          ;;
+      esac
+      ;;
+    commands)
+      case ${INPUT,,} in
+        /back|back)
+          MODE=chats
+          SCREEN_DIRTY=1
+          ;;
+        *)
+          run_command "$INPUT"
+          if (( EXIT_REQUESTED )); then
+            break
+          fi
+          ;;
+      esac
+      ;;
+  esac
 done
 echo "Bye."
