@@ -26,33 +26,51 @@ utilities. No Python client dependency is required.
 - On Linux, install Bash, OpenSSL 3.x, and common Unix command-line utilities
   using your distribution's package manager.
 
-## Connect with the Bashful client
+## Install the client
 
 The client contains its server endpoint as encrypted data and decrypts it at
-startup. To install the `bashful` command for your Linux user, run this from
-the repository:
+startup. Choose the instructions for the terminal you use.
+
+### Linux
+
+From the repository, install the `bashful` command for your Linux user:
 
 ```bash
 bash install.sh
 ```
 
-The installer creates `~/.local/bin/bashful` and does not require root access.
+The installer creates `~/.local/bin/bashful` without requiring root access.
 If it reports that `~/.local/bin` is not in your `PATH`, add this line to
-`~/.bashrc` and open a new terminal:
+your shell startup file (such as `~/.bashrc`) and open a new terminal:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Then start the client from any directory:
+Then start the client from any directory with:
 
 ```bash
 bashful
 ```
 
-You can also pass the same command-line options as the script, for example
-`bashful --username alice`. The installed launcher points to this checkout, so
-keep the repository in place; rerun `bash install.sh` after moving it.
+The installed launcher points to this checkout, so keep the repository in
+place; rerun `bash install.sh` after moving it.
+
+### Windows (Git Bash)
+
+Open Git Bash in the repository and run the client directly:
+
+```bash
+bash chat.sh
+```
+
+To use `bashful` instead, run `bash install.sh` from Git Bash. If the installer
+says `~/.local/bin` is not in your `PATH`, add
+`export PATH="$HOME/.local/bin:$PATH"` to `~/.bashrc` in Git Bash, then open a
+new Git Bash terminal. This command is available in Git Bash; it does not add
+`bashful` to PowerShell or Command Prompt.
+
+## Using the client
 
 After signing in, select a previous chat by number or choose **New chat** and
 enter a registered username. In a conversation, type a message and press Enter
@@ -74,6 +92,9 @@ command line:
 ```bash
 bashful --username alice
 ```
+
+If you are starting the script directly in Git Bash, you can pass the same
+options after `chat.sh`, for example `bash chat.sh --username alice`.
 
 this part used to be a way to connect to different servers, we dont do that anymore
 
