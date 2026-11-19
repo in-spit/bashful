@@ -2,6 +2,12 @@
 # Command-line client for an encrypted messaging service.
 # Requires Bash 4+, OpenSSL 3+, and standard Unix text/file utilities.
 
+# whenever you are reading this code, keep in mind
+# when these sacred scrolls were written, only me (inspitt), god and chatgpt knew what was in there, i do not know bash.
+# there is light in all that is dark, and dark in all that is light. the code is a reflection of the soul of the me, and I am a reflection of the code.
+#
+#
+
 # Use predictable error handling and restrict permissions on created files.
 set -uo pipefail
 umask 077
@@ -14,8 +20,7 @@ usage() {
   local status=2
   [[ ${1:-} == 0 ]] && status=0
   cat >&2 <<'EOF'
-Usage: ./chat.sh [--data-dir DIR] [--username USER]
-Central server: 77.172.104.230:7443
+Usage: bashful [--data-dir DIR] [--username USER]
 
 Commands:
   dm USER MESSAGE
@@ -85,9 +90,17 @@ while (( $# )); do
   esac
 done
 
-# Use the centrally configured server endpoint.
-SERVER_HOST=77.172.104.230
-SERVER_PORT=7443
+# Decrypt the bundled endpoint at runtime to avoid storing it as plain text.
+SERVER_ENDPOINT_KEY=bb996493a925f2a3e3e018d9304b3b9ef66653e63d8d67f8eed55782ff07a273
+SERVER_ENDPOINT_IV=baf44d170e6d9f4c2bfa4545f1ae2a7b
+SERVER_ENDPOINT_CIPHER=KQPEJyPiS7cQqnXpOdDDAJt3sEOB1znk3ItyxOcNfFA=
+SERVER_ENDPOINT=$(printf '%s' "$SERVER_ENDPOINT_CIPHER" \
+  | openssl enc -d -aes-256-cbc -a -A -K "$SERVER_ENDPOINT_KEY" -iv "$SERVER_ENDPOINT_IV" 2>/dev/null) \
+  || die "could not read the configured server endpoint"
+SERVER_HOST=${SERVER_ENDPOINT%:*}
+SERVER_PORT=${SERVER_ENDPOINT##*:}
+[[ -n $SERVER_HOST && $SERVER_PORT =~ ^[0-9]+$ ]] || die "configured server endpoint is invalid"
+unset SERVER_ENDPOINT SERVER_ENDPOINT_KEY SERVER_ENDPOINT_IV SERVER_ENDPOINT_CIPHER
 
 if (( ! LOGO_SHOWN )); then
   show_logo
@@ -542,21 +555,23 @@ load_account() {
   ENC_KEYFILE=$T/enc.pem
   SIGN_KEY=$T/sig.pem
   MY_ENC=$(raw_pub "$ENC_KEYFILE")
+  MY_SIG=$(raw_pub "$SIGN_KEY")
 }
 
 load_account
 
 # Prepare, encrypt, and submit a direct message.
 send_dm() {
-  local user=${1,,} text=$2 enc response mid ts env
+  local user=${1,,} text=$2 enc response mid ts env self_env
   valid_user "$user" || { echo "invalid username"; return 1; }
   contact_keys "$user" || return 1
   enc=$CONTACT_ENC
   mid=$(openssl rand -hex 16) || return 1
   ts=$(date +%s)
   env=$(make_envelope dm "$USERNAME" "$user" "" "$mid" "$ts" "$text" "$enc") || return 1
-  (( ${#env} <= 65536 )) || { echo "message is too long"; return 1; }
-  request send "\"to\":\"$user\",\"mid\":\"$mid\",\"ts\":$ts,\"env\":\"$env\"" \
+  self_env=$(make_envelope dm "$USERNAME" "$USERNAME" "" "$mid" "$ts" "$text" "$MY_ENC") || return 1
+  (( ${#env} <= 65536 && ${#self_env} <= 65536 )) || { echo "message is too long"; return 1; }
+  request send "\"to\":\"$user\",\"mid\":\"$mid\",\"ts\":$ts,\"env\":\"$env\",\"self_env\":\"$self_env\"" \
     || { echo "$LAST_ERROR"; return 1; }
   save_history sent "$user" dm "" "$ts" "$mid" "$text"
   echo "Queued for $user (queued does not mean delivered or read)."
@@ -572,7 +587,7 @@ room_members() {
 
 # Encrypt a room message for its members and retry if membership changes.
 send_room() {
-  local room=${1,,} text=$2 response version mid ts member user enc sig envs="" first=1
+  local room=${1,,} text=$2 response version mid ts member user enc sig envs="" first=1 self_env
   valid_user "$room" || { echo "invalid room name"; return 1; }
   local attempt
   for attempt in 1 2 3; do
@@ -597,11 +612,14 @@ send_room() {
         return 1
       fi
       env=$(make_envelope room "$USERNAME" "$user" "$room" "$mid" "$ts" "$text" "$enc") || return 1
+      (( ${#env} <= 65536 )) || { echo "message is too long"; return 1; }
       (( first )) || envs+=','
       envs+="\"$user\":\"$env\""
       first=0
     done < "$T/members"
-    if request room_send "\"room\":\"$room\",\"version\":$version,\"mid\":\"$mid\",\"ts\":$ts,\"envs\":{$envs}"; then
+    self_env=$(make_envelope room "$USERNAME" "$USERNAME" "$room" "$mid" "$ts" "$text" "$MY_ENC") || return 1
+    (( ${#self_env} <= 65536 )) || { echo "message is too long"; return 1; }
+    if request room_send "\"room\":\"$room\",\"version\":$version,\"mid\":\"$mid\",\"ts\":$ts,\"self_env\":\"$self_env\",\"envs\":{$envs}"; then
       save_history sent "$room" room "$room" "$ts" "$mid" "$text"
       echo "Queued room message for $room."
       return 0
@@ -611,19 +629,145 @@ send_room() {
   echo "Room membership kept changing; retry."
 }
 
-# Print locally saved messages, optionally filtered by contact or room.
+# Remove one locally cached message after the server records its deletion.
+remove_local_message() {
+  local peer=$1 kind=$2 room=$3 mid=$4
+  [[ -f $PROFILE/history ]] || return 0
+  awk -F '\t' -v p="$peer" -v k="$kind" -v r="$room" -v m="$mid" \
+    '!($3==p && $4==k && $5==r && $6==m)' "$PROFILE/history" > "$T/history"
+  mv "$T/history" "$PROFILE/history"
+}
+
+# Remove every locally cached message for a conversation.
+remove_local_conversation() {
+  local conversation=$1 kind=${1%%:*} name=${1#*:}
+  [[ -f $PROFILE/history ]] || return 0
+  if [[ $kind == dm ]]; then
+    awk -F '\t' -v p="$name" '!($3==p && $4=="dm")' "$PROFILE/history" > "$T/history"
+  else
+    awk -F '\t' -v r="$name" '!($4=="room" && $5==r)' "$PROFILE/history" > "$T/history"
+  fi
+  mv "$T/history" "$PROFILE/history"
+}
+
+# Decrypt and cache one server-synced message or apply its deletion marker.
+sync_history_row() {
+  local row=$1 kind sender peer room mid ts env deleted local_peer sig plain
+  kind=$(json_field kind "$row")
+  sender=$(json_field from "$row")
+  peer=$(json_field peer "$row")
+  room=$(json_field room "$row")
+  mid=$(json_field mid "$row")
+  ts=$(json_number ts "$row")
+  deleted=$(sed -n 's/.*"deleted":\(true\|false\).*/\1/p' <<<"$row")
+  if [[ $kind == room ]]; then
+    local_peer=$room
+  else
+    local_peer=$peer
+  fi
+  [[ -n $mid && -n $local_peer ]] || return
+  if [[ $deleted == true ]]; then
+    remove_local_message "$local_peer" "$kind" "$room" "$mid"
+    return
+  fi
+  if [[ -f $PROFILE/history ]] && awk -F '\t' -v p="$local_peer" -v k="$kind" -v r="$room" -v m="$mid" \
+    '$3==p && $4==k && $5==r && $6==m {found=1} END{exit !found}' "$PROFILE/history"; then
+    return
+  fi
+  if [[ $sender == "$USERNAME" ]]; then
+    sig=$MY_SIG
+  else
+    contact_keys "$sender" || {
+      echo "Could not sync a message from $sender; trust them first, then reopen this chat."
+      return
+    }
+    sig=$CONTACT_SIG
+  fi
+  env=$(json_field env "$row")
+  if plain=$(open_envelope "$env" "$kind" "$sender" "$USERNAME" "$room" "$mid" "$ts" "$sig"); then
+    if [[ $sender == "$USERNAME" ]]; then
+      save_history sent "$local_peer" "$kind" "$room" "$ts" "$mid" "$plain"
+    else
+      save_history received "$local_peer" "$kind" "$room" "$ts" "$mid" "$plain"
+    fi
+  else
+    echo "Could not verify or decrypt synced message $mid from $sender." >&2
+  fi
+}
+
+# Synchronize one direct-message or room conversation, including deletion markers.
+sync_chat() {
+  local conversation=$1 name kind fields after rows row next more
+  kind=${conversation%%:*}
+  name=${conversation#*:}
+  case $kind in
+    dm) fields="\"peer\":\"$name\"" ;;
+    room) fields="\"room\":\"$name\"" ;;
+    *) echo "Invalid chat selection." >&2; return 1 ;;
+  esac
+  after=0
+  while :; do
+    request history "$fields,\"after\":$after,\"limit\":20" || {
+      echo "Could not sync chat history: $LAST_ERROR" >&2
+      return 1
+    }
+    rows=$(sed -n 's/.*"messages":\[\(.*\)\],"more":.*$/\1/p' <<<"$LAST_REPLY")
+    if [[ -n $rows ]]; then
+      printf '%s\n' "$rows" | sed 's/},{/}\n{/g' > "$T/history-rows"
+      while IFS= read -r row; do
+        sync_history_row "$row"
+      done < "$T/history-rows"
+    fi
+    more=$(sed -n 's/.*"more":\(true\|false\).*/\1/p' <<<"$LAST_REPLY")
+    next=$(json_number next "$LAST_REPLY")
+    [[ $next =~ ^[0-9]+$ && $next -ge $after ]] || {
+      echo "Server returned an invalid history cursor." >&2
+      return 1
+    }
+    [[ $more == true && $next -gt $after ]] || break
+    after=$next
+  done
+}
+
+# Delete a message or all history for one conversation from this account's devices.
+delete_server_history() {
+  local conversation=$1 mid=${2:-} name kind fields
+  kind=${conversation%%:*}
+  name=${conversation#*:}
+  case $kind in
+    dm) fields="\"peer\":\"$name\"" ;;
+    room) fields="\"room\":\"$name\"" ;;
+    *) echo "Invalid chat selection." >&2; return 1 ;;
+  esac
+  [[ -n $mid ]] && fields+=",\"mid\":\"$mid\""
+  request history_delete "$fields" || { echo "$LAST_ERROR"; return 1; }
+}
+
+# Print local messages, optionally filtered by contact or room; keep delete indexes.
 history() {
-  local target=${1:-}
+  local target=${1:-} filter_kind="" filter_peer="" filter_room=""
+  HISTORY_MIDS=()
   [[ -f $PROFILE/history ]] || { echo "No saved messages."; return; }
-  awk -F '\t' -v u="${target,,}" '
-    u=="" || ($3==u) || ($4=="room" && u=="room:"$5) {
+  case $target in
+    dm:*) filter_kind=dm; filter_peer=${target#dm:} ;;
+    room:*) filter_kind=room; filter_room=${target#room:} ;;
+    "") ;;
+    *) filter_kind=dm; filter_peer=${target,,} ;;
+  esac
+  if [[ -n $target ]]; then
+    mapfile -t HISTORY_MIDS < <(awk -F '\t' -v k="$filter_kind" -v p="$filter_peer" -v r="$filter_room" \
+      '$4==k && (k=="dm" ? $3==p : $5==r) {print $6}' "$PROFILE/history")
+  fi
+  awk -F '\t' -v k="$filter_kind" -v p="$filter_peer" -v r="$filter_room" -v filtered="$target" '
+    filtered=="" || ($4==k && (k=="dm" ? $3==p : $5==r)) {
+      count++
       cmd="printf %s "$7" | base64 -d"
       cmd | getline text
       close(cmd)
       when=strftime("%Y-%m-%d %H:%M:%S",$1)
       who=($2=="sent" ? "you" : $3)
       label=($4=="room" ? "room:"$5 : $3)
-      printf "%s [%s] %s: %s\n",when,label,who,text
+      printf "%d. %s [%s] %s: %s\n", count, when, label, who, text
     }' "$PROFILE/history" | cat -v
 }
 
@@ -726,12 +870,19 @@ read_input() {
 # Build the direct-chat list from known contacts and locally saved messages.
 load_chat_list() {
   : > "$T/chat-list"
-  if [[ -f $PROFILE/contacts ]]; then
-    awk -v me="$USERNAME" '$1 != me && $1 != "" {print $1}' "$PROFILE/contacts" >> "$T/chat-list"
-  fi
   if [[ -f $PROFILE/history ]]; then
-    awk -F '\t' -v me="$USERNAME" '$4 == "dm" && $3 != me && $3 != "" {print $3}' \
-      "$PROFILE/history" >> "$T/chat-list"
+    awk -F '\t' -v me="$USERNAME" '
+      $4=="dm" && $3!=me && $3!="" {print "dm:"$3}
+      $4=="room" && $5!="" {print "room:"$5}
+    ' "$PROFILE/history" >> "$T/chat-list"
+  fi
+  if request chat_list; then
+    remote_chats=$(sed -n 's/.*"chats":\[\(.*\)\],"id":.*/\1/p' <<<"$LAST_REPLY")
+    if [[ -n $remote_chats ]]; then
+      printf '%s\n' "$remote_chats" | tr ',' '\n' | tr -d '"' >> "$T/chat-list"
+    fi
+  else
+    echo "Could not refresh chat list: $LAST_ERROR" >&2
   fi
   sort -u "$T/chat-list" -o "$T/chat-list"
   mapfile -t CHAT_PEERS < "$T/chat-list"
@@ -743,13 +894,14 @@ while (( ! EXIT_REQUESTED )); do
   # Handle incoming frames while waiting for input.
   if read_frame 0.2; then
     handle_push "$FRAME"
-    [[ $MODE == chats ]] && SCREEN_DIRTY=1
+    SCREEN_DIRTY=1
     continue
   elif (( READ_STATUS <= 128 )); then
     die "server disconnected"
   fi
 
   if (( SCREEN_DIRTY )); then
+    show_logo
     case $MODE in
       chats)
         load_chat_list
@@ -757,7 +909,9 @@ while (( ! EXIT_REQUESTED )); do
         echo "Chats"
         if (( ${#CHAT_PEERS[@]} )); then
           for i in "${!CHAT_PEERS[@]}"; do
-            printf '%d) %s\n' "$((i + 1))" "${CHAT_PEERS[i]}"
+            chat_name=${CHAT_PEERS[i]#*:}
+            [[ ${CHAT_PEERS[i]} == room:* ]] && chat_name="room: $chat_name"
+            printf '%d) %s\n' "$((i + 1))" "$chat_name"
           done
         else
           echo "No previous chats."
@@ -768,7 +922,12 @@ while (( ! EXIT_REQUESTED )); do
         ;;
       chat)
         echo
-        echo "Chat with $CURRENT_CHAT  (type /back to return)"
+        if [[ $CURRENT_CHAT == room:* ]]; then
+          echo "Room chat ${CURRENT_CHAT#room:}  (type /back to return)"
+        else
+          echo "Chat with ${CURRENT_CHAT#dm:}  (type /back to return)"
+        fi
+        sync_chat "$CURRENT_CHAT"
         history "$CURRENT_CHAT"
         ;;
       new)
@@ -785,7 +944,7 @@ while (( ! EXIT_REQUESTED )); do
 
   prompt="chats> "
   case $MODE in
-    chat) prompt="$CURRENT_CHAT> " ;;
+    chat) prompt="${CURRENT_CHAT#*:}> " ;;
     new) prompt="username> " ;;
     commands) prompt="commands> " ;;
   esac
@@ -827,28 +986,69 @@ while (( ! EXIT_REQUESTED )); do
       elif [[ ${INPUT,,} == "$USERNAME" ]]; then
         echo "You cannot start a chat with yourself."
       else
-        CURRENT_CHAT=${INPUT,,}
+        CURRENT_CHAT="dm:${INPUT,,}"
         MODE=chat
         SCREEN_DIRTY=1
       fi
       ;;
     chat)
-      case ${INPUT,,} in
+      case ${INPUT%% *} in
         /back|back)
           CURRENT_CHAT=""
           MODE=chats
           SCREEN_DIRTY=1
           ;;
         /help|help)
-          echo "Type a message and press Enter to send. Use /back to return to chats."
+          echo "Type a message and press Enter to send."
+          echo "/history, /delete NUMBER, /clear, /back"
           ;;
         /history)
-          history "$CURRENT_CHAT"
+          SCREEN_DIRTY=1
           ;;
-        "")
+        /delete)
+          delete_number=${INPUT#* }
+          if [[ $delete_number == "$INPUT" || ! $delete_number =~ ^[0-9]{1,9}$ ]]; then
+            echo "Usage: /delete MESSAGE_NUMBER"
+          else
+            delete_number=$((10#$delete_number))
+            if (( delete_number < 1 || delete_number > ${#HISTORY_MIDS[@]} )); then
+              echo "No message with that number."
+            else
+              chat_kind=${CURRENT_CHAT%%:*}
+              chat_name=${CURRENT_CHAT#*:}
+              delete_mid=${HISTORY_MIDS[delete_number-1]}
+              if delete_server_history "$CURRENT_CHAT" "$delete_mid"; then
+                if [[ $chat_kind == dm ]]; then
+                  remove_local_message "$chat_name" dm "" "$delete_mid"
+                else
+                  remove_local_message "$chat_name" room "$chat_name" "$delete_mid"
+                fi
+                echo "Deleted message from your account history."
+                SCREEN_DIRTY=1
+              fi
+            fi
+          fi
           ;;
+        /clear)
+          read -r -p "Delete this conversation from your account on all devices? [y/N] " confirm
+          if [[ $confirm == [yY]* ]]; then
+            if delete_server_history "$CURRENT_CHAT"; then
+              remove_local_conversation "$CURRENT_CHAT"
+              echo "Deleted conversation history from your account."
+              SCREEN_DIRTY=1
+            fi
+          fi
+          ;;
+        "") ;;
         *)
-          send_dm "$CURRENT_CHAT" "$INPUT"
+          chat_kind=${CURRENT_CHAT%%:*}
+          chat_name=${CURRENT_CHAT#*:}
+          if [[ $chat_kind == room ]]; then
+            send_room "$chat_name" "$INPUT"
+          else
+            send_dm "$chat_name" "$INPUT"
+          fi
+          SCREEN_DIRTY=1
           ;;
       esac
       ;;

@@ -28,12 +28,31 @@ utilities. No Python client dependency is required.
 
 ## Connect with the Bashful client
 
-The client uses the server configured in `chat.sh` at `77.172.104.230:7443`.
-From the repository, start the client:
+The client contains its server endpoint as encrypted data and decrypts it at
+startup. To install the `bashful` command for your Linux user, run this from
+the repository:
 
 ```bash
-./chat.sh
+bash install.sh
 ```
+
+The installer creates `~/.local/bin/bashful` and does not require root access.
+If it reports that `~/.local/bin` is not in your `PATH`, add this line to
+`~/.bashrc` and open a new terminal:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Then start the client from any directory:
+
+```bash
+bashful
+```
+
+You can also pass the same command-line options as the script, for example
+`bashful --username alice`. The installed launcher points to this checkout, so
+keep the repository in place; rerun `bash install.sh` after moving it.
 
 After signing in, select a previous chat by number or choose **New chat** and
 enter a registered username. In a conversation, type a message and press Enter
@@ -41,18 +60,22 @@ to send it; use `/back` to return to the chat list. Use **Commands** for room
 management, trust controls, and other client commands.
 
 Messages are queued by the server while the recipient is offline and delivered
-when they reconnect. The server does not keep a history after messages are
-acknowledged, so the client stores conversation history locally.
+when they reconnect. Encrypted direct and room-message history is also retained
+on the server so it can sync to other devices using the same account. New
+messages are synced; history already stored only on a device is not uploaded.
+Use `/delete NUMBER` or `/clear` in a conversation to delete history from your
+account on all devices. The other participants keep their own copies.
+The server stores a password-derived verifier and an encrypted private-key
+backup, not your plaintext password or message contents.
 
 You can prefill the username and choose a local data directory from the
 command line:
 
 ```bash
-./chat.sh --username alice
+bashful --username alice
 ```
 
-To change the central endpoint, update `SERVER_HOST` and `SERVER_PORT` in
-`chat.sh`.
+this part used to be a way to connect to different servers, we dont do that anymore
 
 The first time you connect to the central server, the client displays the
 certificate's SHA-256 fingerprint and asks whether to trust it. Compare it
@@ -74,7 +97,7 @@ different local data directory with `--data-dir` and prefill the username with
 `--username`:
 
 ```bash
-./chat.sh --username alice --data-dir "$HOME/.bashful"
+bashful --username alice --data-dir "$HOME/.bashful"
 ```
 
-See [server/PROTOCOL.md](server/PROTOCOL.md) for protocol details.
+See [server/PROTOCOL.md](server/PROTOCOL.md) for server setup and protocol details.
