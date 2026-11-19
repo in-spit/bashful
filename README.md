@@ -68,33 +68,28 @@ Optional server settings:
 
 ## Connect with the Bashful client
 
-On the client computer, open a terminal in the repository and run:
+The client uses the central server configured in `chat.sh` at
+`77.172.104.230:7443`. From the repository, start the interactive menu:
 
 ```bash
-./chat.sh SERVER_HOST
+./chat.sh
 ```
 
-For example, on the same computer as the server:
+Choose **Connect to the central server**. You can also start a connection
+directly from the command line:
 
 ```bash
-./chat.sh localhost
+./chat.sh --username alice
 ```
 
-Or, from another computer on the network:
+To change the central endpoint, update `SERVER_HOST` and `SERVER_PORT` in
+`chat.sh`.
 
-```bash
-./chat.sh 192.168.1.25
-```
-
-Use the server's reachable hostname or IP address. If you changed the port,
-include it as `HOST:PORT`, for example `./chat.sh chat.example.com:7443`.
-IPv6 addresses must be bracketed, for example
-`./chat.sh [2001:db8::1]:7443`.
-
-The first time you connect to a server, the client displays the certificate's
-SHA-256 fingerprint and asks whether to trust it. Compare it with the
-fingerprint printed in the server terminal using a trusted channel before
-answering `y`. The client remembers the pinned certificate for that server.
+The first time you connect to the central server, the client displays the
+certificate's SHA-256 fingerprint and asks whether to trust it. Compare it
+with the fingerprint printed in the server terminal using a trusted channel
+before answering `y`. The client remembers the pinned certificate for that
+server.
 If the server certificate changes unexpectedly, stop and verify the change
 with the server operator before trusting it again.
 
@@ -119,7 +114,7 @@ different local data directory with `--data-dir` and prefill the username with
 `--username`:
 
 ```bash
-./chat.sh --username alice --data-dir "$HOME/.bashful" chat.example.com
+./chat.sh --username alice --data-dir "$HOME/.bashful"
 ```
 
 See [server/PROTOCOL.md](server/PROTOCOL.md) for protocol details and

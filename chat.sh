@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
-# Bash client for the Bashful store-and-forward server
+# Command-line client for an encrypted messaging service.
 # Requires Bash 4+, OpenSSL 3+, and standard Unix text/file utilities.
 
+# Use predictable error handling and restrict permissions on created files.
 set -u
 umask 077
 
+# Print an error and stop the program.
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+# Display supported options and commands, then exit with the requested status.
 usage() {
   local status=2
   [[ ${1:-} == 0 ]] && status=0
   cat >&2 <<'EOF'
-Usage: ./chat.sh [--data-dir DIR] [--username USER] HOST[:PORT]
-Default server port: 7443
+Usage: ./chat.sh [--data-dir DIR] [--username USER]
+Central server: 77.172.104.230:7443
 
 Commands:
   dm USER MESSAGE
@@ -24,6 +28,19 @@ EOF
   exit "$status"
 }
 
+# Print the application banner.
+show_logo() {
+  cat <<'EOF'
+ ____            _     _____      _   _   _____ ____  _____
+| __ )  __ _ ___| |__ |  ___|   _| | | | | ____|___ \| ____|
+|  _ \ / _` / __| '_ \| |_ | | | | | | | |  _|   __) |  _|
+| |_) | (_| \__ \ | | |  _|| |_| | | | | | |___ / __/| |___
+|____/ \__,_|___/_| |_|_|   \__,_|_| | | |_____|_____|_____|
+                                     |_|
+EOF
+}
+
+# Check that the required tools and cryptographic library are available.
 for command in openssl sed awk od base64 dd mktemp tail tr wc grep date timeout cat; do
   command -v "$command" >/dev/null 2>&1 || die "required command not found: $command"
 done
@@ -31,6 +48,32 @@ done
 OPENSSL_VERSION=$(openssl version | awk '{print $2}')
 [[ $OPENSSL_VERSION =~ ^3\. ]] || die "OpenSSL 3.x is required for Ed25519 signing"
 
+# Show an interactive launcher when the script is started without arguments.
+LOGO_SHOWN=0
+if (( $# == 0 )); then
+  show_logo
+  LOGO_SHOWN=1
+  while :; do
+    echo
+    echo "Chat client"
+    echo "1) Connect to the central server"
+    echo "2) Show command-line help"
+    echo "3) Exit"
+    if ! read -r -p "Choose an option: " menu_choice; then
+      echo
+      exit 0
+    fi
+
+    case $menu_choice in
+      1) break ;;
+      2) usage 0 ;;
+      3) exit 0 ;;
+      *) echo "Choose 1, 2, or 3." ;;
+    esac
+  done
+fi
+
+# Read command-line options and select the local data folder and account.
 DATA_DIR=${CHAT_HOME:-$HOME/.e2e-chat}
 USERNAME=""
 while (( $# )); do
@@ -38,29 +81,19 @@ while (( $# )); do
     --data-dir) (( $# >= 2 )) || usage; DATA_DIR=$2; shift 2 ;;
     --username|-u) (( $# >= 2 )) || usage; USERNAME=$2; shift 2 ;;
     --help|-h) usage 0 ;;
-    --*) usage ;;
-    *) SERVER_ADDRESS=$1; shift; break ;;
+    *) usage ;;
   esac
 done
-[[ -n ${SERVER_ADDRESS:-} && $# == 0 ]] || usage
 
-if [[ $SERVER_ADDRESS == \[* ]]; then
-  [[ $SERVER_ADDRESS =~ ^\[([^]]+)\](:([0-9]+))?$ ]] || die "invalid server address"
-  SERVER_HOST=${BASH_REMATCH[1]}
-  SERVER_PORT=${BASH_REMATCH[3]:-7443}
-else
-  if [[ $SERVER_ADDRESS == *:* ]]; then
-    [[ $SERVER_ADDRESS != *:*:* ]] || die "write IPv6 addresses as [address]:port"
-    SERVER_HOST=${SERVER_ADDRESS%:*}
-    SERVER_PORT=${SERVER_ADDRESS##*:}
-  else
-    SERVER_HOST=$SERVER_ADDRESS
-    SERVER_PORT=7443
-  fi
+# Use the centrally configured server endpoint.
+SERVER_HOST=77.172.104.230
+SERVER_PORT=7443
+
+if (( ! LOGO_SHOWN )); then
+  show_logo
 fi
-[[ -n $SERVER_HOST && $SERVER_PORT =~ ^[0-9]+$ ]] || die "invalid server address"
-(( SERVER_PORT >= 1 && SERVER_PORT <= 65535 )) || die "port must be between 1 and 65535"
 
+# Create temporary working files and remove them when the program exits.
 T=$(mktemp -d) || die "could not create temporary directory"
 TLS_PID=""
 cleanup() {
@@ -73,10 +106,12 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap '' PIPE
 
+# Prepare the private directory and stable certificate-pin filename.
 mkdir -p "$DATA_DIR/pins" || die "could not create $DATA_DIR/pins"
 chmod 700 "$DATA_DIR" "$DATA_DIR/pins" 2>/dev/null || :
 PIN_FILE=$DATA_DIR/pins/$(printf '%s:%s' "$SERVER_HOST" "$SERVER_PORT" | openssl dgst -sha256 | sed 's/^.*= *//').pem
 
+# Provide helpers for hashes, key conversion, input validation, and JSON fields.
 sha256() { openssl dgst -sha256 "$1" | sed 's/^.*= *//'; }
 sha256_stdin() { openssl dgst -sha256 | sed 's/^.*= *//'; }
 hmac_file() {
@@ -110,6 +145,7 @@ json_number() {
 }
 json_id() { json_number id "$1"; }
 
+# Fetch the server certificate once and save it only after the user approves it.
 pin_server() {
   [[ -f $PIN_FILE ]] && return
   printf 'Fetching server certificate... '
@@ -135,6 +171,7 @@ pin_server() {
   chmod 600 "$PIN_FILE" 2>/dev/null || :
 }
 
+# Establish the encrypted connection and expose its input and output streams.
 pin_server
 coproc TLS { exec openssl s_client -quiet -connect "$SERVER_HOST:$SERVER_PORT" \
   -servername "$SERVER_HOST" -CAfile "$PIN_FILE" -verify_return_error 2>/dev/null; }
@@ -143,6 +180,8 @@ exec 3<&"${TLS[0]}" 4>&"${TLS[1]}" || die "could not start TLS connection"
 FRAME=""
 NET_BUFFER=""
 READ_STATUS=0
+
+# Read and validate one complete line-delimited frame from the server.
 read_frame() {
   local timeout=${1:-90}
   local part=""
@@ -165,26 +204,31 @@ read_frame 15 || die "server disconnected during TLS handshake"
   || die "server does not speak protocol version 1"
 NEEDS_INVITE=$(sed -n 's/.*"invite":\(true\|false\).*/\1/p' <<<"$FRAME")
 
+# Track request and response data shared by the protocol helpers.
 NEXT_ID=0
 LAST_FRAME=""
 LAST_ERROR=""
 LAST_REPLY=""
 
+# Confirm receipt of a server-delivered mailbox item.
 ack_mailbox() {
   printf '{"t":"ack","ids":[%s]}\n' "$1" >&4 \
     || die "connection lost while acknowledging a message"
 }
 
+# Append a message to the local history file in a tab-separated format.
 save_history() {
   local direction=$1 peer=$2 kind=$3 room=$4 ts=$5 mid=$6 text=$7 encoded
   encoded=$(printf '%s' "$text" | base64 | tr -d '\r\n')
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$ts" "$direction" "$peer" "$kind" "$room" "$mid" "$encoded" >> "$PROFILE/history"
 }
 
+# Build the message metadata used as authenticated encryption context.
 make_aad() {
   printf '["%s","%s","%s","%s","%s",%s]' "$1" "$2" "$3" "$4" "$5" "$6"
 }
 
+# Derive a shared secret from a private key and a peer's public key.
 dh_hex() {
   local private_pem=$1 peer_hex=$2 der=$T/peer.der
   { printf '%b' '\x30\x2a\x30\x05\x06\x03\x2b\x65\x6e\x03\x21\x00'; hex_bin "$peer_hex"; } > "$der"
@@ -192,12 +236,14 @@ dh_hex() {
     | od -An -tx1 | tr -d ' \n'
 }
 
+# Derive separate encryption and authentication keys from a shared secret.
 derive_msg_keys() {
   local shared=$1 context=$2
   ENC_KEY=$(printf '%s|enc|%s' "$shared" "$context" | sha256_stdin)
   MAC_KEY=$(printf '%s|mac|%s' "$shared" "$context" | sha256_stdin)
 }
 
+# Encrypt, authenticate, and sign a message for one recipient.
 make_envelope() {
   local kind=$1 sender=$2 recipient=$3 room=$4 mid=$5 ts=$6 text=$7 recipient_enc=$8
   local eph=$T/eph.pem eph_pub shared aad iv cipher sig message mac
@@ -225,6 +271,7 @@ make_envelope() {
   base64 < "$T/envelope" | tr -d '\r\n'
 }
 
+# Verify and decrypt a received message envelope.
 open_envelope() {
   local envelope=$1 kind=$2 sender=$3 recipient=$4 room=$5 mid=$6 ts=$7
   local sender_sig=$8
@@ -261,6 +308,7 @@ open_envelope() {
   cat "$T/plain"
 }
 
+# Retrieve a contact's public keys and confirm their identity before trusting them.
 contact_keys() {
   local user=${1,,} response enc sig known_enc known_sig answer
   valid_user "$user" || { echo "invalid username"; return 1; }
@@ -293,6 +341,7 @@ contact_keys() {
   CONTACT_ENC=$enc CONTACT_SIG=$sig
 }
 
+# Validate an incoming message, display or hold it, and acknowledge it as appropriate.
 process_message() {
   local frame=$1 mbid kind sender room mid ts env known_enc known_sig plain
   mbid=$(json_number mbid "$frame")
@@ -328,6 +377,7 @@ process_message() {
   ack_mailbox "$mbid"
 }
 
+# Display a room membership event and acknowledge it.
 process_event() {
   local frame=$1 mbid kind room user by
   mbid=$(json_number mbid "$frame")
@@ -339,6 +389,7 @@ process_event() {
   [[ $mbid =~ ^[0-9]+$ ]] && ack_mailbox "$mbid"
 }
 
+# Route unsolicited server frames to the appropriate handler.
 handle_push() {
   local frame=$1 type code
   type=$(json_field t "$frame")
@@ -353,6 +404,7 @@ handle_push() {
   esac
 }
 
+# Send a request and wait for its matching response while handling server pushes.
 request() {
   local command=$1 fields=${2:-} frame id response_type
   ((NEXT_ID++))
@@ -389,6 +441,7 @@ request() {
   return 1
 }
 
+# Register an account or unlock an existing account's encrypted identity keys.
 load_account() {
   local action answer password password2 auth_salt blob_salt auth_key blob_key
   local blob_enc_key blob_mac_key enc sig blob response invite_value
@@ -478,6 +531,7 @@ load_account() {
 
 load_account
 
+# Prepare, encrypt, and submit a direct message.
 send_dm() {
   local user=${1,,} text=$2 enc response mid ts env
   valid_user "$user" || { echo "invalid username"; return 1; }
@@ -493,6 +547,7 @@ send_dm() {
   echo "Queued for $user (queued does not mean delivered or read)."
 }
 
+# Request the current membership and key information for a room.
 room_members() {
   local room=$1 response
   request room_info "\"room\":\"$room\"" || { echo "$LAST_ERROR"; return 1; }
@@ -500,6 +555,7 @@ room_members() {
   LAST_ROOM_INFO=$response
 }
 
+# Encrypt a room message for its members and retry if membership changes.
 send_room() {
   local room=${1,,} text=$2 response version mid ts member user enc sig envs="" first=1
   valid_user "$room" || { echo "invalid room name"; return 1; }
@@ -540,6 +596,7 @@ send_room() {
   echo "Room membership kept changing; retry."
 }
 
+# Print locally saved messages, optionally filtered by contact or room.
 history() {
   local target=${1:-}
   [[ -f $PROFILE/history ]] || { echo "No saved messages."; return; }
@@ -555,6 +612,7 @@ history() {
     }' "$PROFILE/history" | cat -v
 }
 
+# Parse and execute one command entered at the interactive prompt.
 run_command() {
   local input=$1 command rest user room reply
   command=${input%% *}
@@ -624,6 +682,7 @@ run_command() {
 EXIT_REQUESTED=0
 LAST_PING=$(date +%s)
 PENDING_INPUT=""
+# Keep the connection alive, process incoming frames, and read user commands.
 echo "Connected as $USERNAME. Type help for commands."
 while (( ! EXIT_REQUESTED )); do
   now=$(date +%s)
@@ -631,7 +690,7 @@ while (( ! EXIT_REQUESTED )); do
     request ping || die "$LAST_ERROR"
     LAST_PING=$now
   fi
-  # Read pushes while waiting at the prompt so offline-delivered mail is handled.
+  # Handle incoming frames while waiting for input.
   if read_frame 0.2; then
     handle_push "$FRAME"
     continue
