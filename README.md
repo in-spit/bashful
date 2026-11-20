@@ -120,5 +120,3 @@ different local data directory with `--data-dir` and prefill the username with
 ```bash
 bashful --username alice --data-dir "$HOME/.bashful"
 ```
-
-See [server/PROTOCOL.md](server/PROTOCOL.md) for server setup and protocol details.
