@@ -27,6 +27,7 @@ Commands:
   history [USER|room:ROOM]
   trust USER | untrust USER
   rooms | room-create NAME | room-add NAME USER | room-kick NAME USER
+  room-join CODE | room-settings ROOM
   room-leave NAME | room-info NAME | room-send NAME MESSAGE
   help | quit
 EOF
@@ -585,6 +586,127 @@ room_members() {
   LAST_ROOM_INFO=$response
 }
 
+# Manage a room's administrators from its owner-only settings menu.
+manage_room_admins() {
+  local room=$1 response owner member member_row user is_admin target enabled
+  while :; do
+    room_members "$room" || return 1
+    response=$LAST_ROOM_INFO
+    owner=$(json_field admin "$response")
+    printf '\nAdministrators for %s (owner: %s)\n' "$room" "$owner"
+    printf '%s\n' "$response" | sed -n 's/.*"members":\[\(.*\)\],"id":.*/\1/p' \
+      | sed 's/},{/}\n{/g' > "$T/room-members"
+    while IFS= read -r member; do
+      user=$(json_field user "$member")
+      is_admin=$(sed -n 's/.*"sig":"[^"]*","is_admin":\(true\|false\).*/\1/p' <<<"$member")
+      if [[ $user == "$owner" ]]; then
+        printf '  %s (owner)\n' "$user"
+      elif [[ $is_admin == true ]]; then
+        printf '  %s (administrator)\n' "$user"
+      else
+        printf '  %s\n' "$user"
+      fi
+    done < "$T/room-members"
+    read -r -p "Member to promote/demote, or back: " target || return 0
+    [[ ${target,,} == back || -z $target ]] && return 0
+    target=${target,,}
+    if ! valid_user "$target"; then
+      echo "Invalid username."
+      continue
+    fi
+    if [[ $target == "$owner" ]]; then
+      echo "The room owner is always an administrator."
+      continue
+    fi
+    member=""
+    while IFS= read -r member_row; do
+      [[ $(json_field user "$member_row") == "$target" ]] && { member=$member_row; break; }
+    done < "$T/room-members"
+    if [[ -z $member ]]; then
+      echo "That user is not a room member."
+      continue
+    fi
+    is_admin=$(sed -n 's/.*"sig":"[^"]*","is_admin":\(true\|false\).*/\1/p' <<<"$member")
+    [[ $is_admin == true ]] && enabled=false || enabled=true
+    request room_admin_set "\"room\":\"$room\",\"user\":\"$target\",\"enabled\":$enabled" \
+      || { echo "$LAST_ERROR"; continue; }
+    [[ $enabled == true ]] && echo "$target is now an administrator." \
+      || echo "$target is no longer an administrator."
+  done
+}
+
+# Open the administrator-only room settings menu.
+room_settings_menu() {
+  local room=${1,,} response is_admin owner choice code
+  room_members "$room" || return 1
+  response=$LAST_ROOM_INFO
+  is_admin=$(sed -n 's/.*"admin":"[^"]*","is_admin":\(true\|false\).*/\1/p' <<<"$response")
+  [[ $is_admin == true ]] || { echo "Room settings are only available to administrators."; return 1; }
+  owner=$(json_field admin "$response")
+  while :; do
+    echo
+    echo "Room settings: $room"
+    echo "1) Create invite code"
+    echo "2) Revoke invite code"
+    echo "3) Assign/remove administrators (owner only)"
+    echo "4) Back"
+    read -r -p "Choose an option: " choice || return 0
+    case $choice in
+      1)
+        if request room_invite_create "\"room\":\"$room\""; then
+          code=$(json_field code "$LAST_REPLY")
+          echo "Share this reusable invite code; it is shown only once:"
+          echo "$code"
+        else
+          echo "$LAST_ERROR"
+        fi
+        ;;
+      2)
+        read -r -p "Invite code to revoke: " code || return 0
+        if [[ ! $code =~ ^[A-Za-z0-9_-]{1,128}$ ]]; then
+          echo "Invalid invite code."
+        elif request room_invite_revoke "\"room\":\"$room\",\"code\":\"$code\""; then
+          echo "Invite code revoked."
+        else
+          echo "$LAST_ERROR"
+        fi
+        ;;
+      3)
+        if [[ $USERNAME == "$owner" ]]; then
+          manage_room_admins "$room" || return 1
+        else
+          echo "Only the room owner can assign administrators."
+        fi
+        ;;
+      4|back|Back) return 0 ;;
+      *) echo "Choose 1, 2, 3, or 4." ;;
+    esac
+  done
+}
+
+# Join a group using an administrator-generated reusable invite code.
+join_room_with_code() {
+  local code=$1 room
+  [[ $code =~ ^[A-Za-z0-9_-]{1,128}$ ]] || { echo "Invalid invite code."; return 1; }
+  request room_join "\"code\":\"$code\"" || { echo "$LAST_ERROR"; return 1; }
+  room=$(json_field room "$LAST_REPLY")
+  echo "Joined $room. New members can read messages sent after joining."
+  CURRENT_CHAT="room:$room"
+  MODE=chat
+  SCREEN_DIRTY=1
+}
+
+# Create a group and open it so the owner can configure invites.
+create_group() {
+  local room=${1,,}
+  valid_user "$room" || { echo "Group name must be 1-32 letters, digits, _ or -."; return 1; }
+  request room_create "\"room\":\"$room\"" || { echo "$LAST_ERROR"; return 1; }
+  echo "Created group $room. Type /settings to create an invite code."
+  CURRENT_CHAT="room:$room"
+  MODE=chat
+  SCREEN_DIRTY=1
+}
+
 # Encrypt a room message for its members and retry if membership changes.
 send_room() {
   local room=${1,,} text=$2 response version mid ts member user enc sig envs="" first=1 self_env
@@ -783,6 +905,7 @@ run_command() {
     help)
       echo "dm USER MESSAGE | history [USER|room:ROOM] | trust USER | untrust USER"
       echo "rooms | room-create NAME | room-add NAME USER | room-kick NAME USER"
+      echo "room-join CODE | room-settings ROOM"
       echo "room-leave NAME | room-info NAME | room-send NAME MESSAGE | quit" ;;
     dm|room-send)
       user=${rest%% *}
@@ -817,8 +940,14 @@ run_command() {
       printf '%s\n' "$reply" | sed 's/},{/}\n{/g' | grep '"room"' |
         sed -E 's/.*"room":"([^"]+)".*"admin":"([^"]+)".*"version":([0-9]+).*/\1 (admin \2, version \3)/' ;;
     room-create)
-      room=${rest,,}; valid_user "$room" || { echo "invalid room name"; return; }
-      request room_create "\"room\":\"$room\"" && echo "Created $room." || echo "$LAST_ERROR" ;;
+      [[ -n $rest ]] || { echo "usage: room-create NAME"; return; }
+      create_group "$rest" ;;
+    room-join)
+      [[ -n $rest ]] || { echo "usage: room-join CODE"; return; }
+      join_room_with_code "$rest" ;;
+    room-settings)
+      room=${rest,,}; valid_user "$room" || { echo "usage: room-settings ROOM"; return; }
+      room_settings_menu "$room" ;;
     room-add|room-kick)
       read -r room user <<<"$rest"; room=${room,,}; user=${user,,}
       valid_user "$room" && valid_user "$user" || { echo "usage: $command ROOM USER"; return; }
@@ -917,6 +1046,8 @@ while (( ! EXIT_REQUESTED )); do
           echo "No previous chats."
         fi
         echo "n) New chat"
+        echo "g) Create a group"
+        echo "j) Join group with an invite code"
         echo "c) Commands (rooms, trust, account tools)"
         echo "q) Quit"
         ;;
@@ -934,6 +1065,14 @@ while (( ! EXIT_REQUESTED )); do
         echo
         echo "Start a direct chat with a registered username (or /back)."
         ;;
+      create_group)
+        echo
+        echo "Create a group with a name (or /back)."
+        ;;
+      join)
+        echo
+        echo "Join a group with its invite code (or /back)."
+        ;;
       commands)
         echo
         echo "Commands mode. Type help for commands, or back to return to chats."
@@ -946,6 +1085,8 @@ while (( ! EXIT_REQUESTED )); do
   case $MODE in
     chat) prompt="${CURRENT_CHAT#*:}> " ;;
     new) prompt="username> " ;;
+    create_group) prompt="group name> " ;;
+    join) prompt="invite code> " ;;
     commands) prompt="commands> " ;;
   esac
   read_input "$prompt"
@@ -960,6 +1101,8 @@ while (( ! EXIT_REQUESTED )); do
       case ${INPUT,,} in
         q|quit|exit) EXIT_REQUESTED=1 ;;
         n|new) MODE=new; SCREEN_DIRTY=1 ;;
+        g|group|create) MODE=create_group; SCREEN_DIRTY=1 ;;
+        j|join) MODE=join; SCREEN_DIRTY=1 ;;
         c|commands) MODE=commands; SCREEN_DIRTY=1 ;;
         *)
           if [[ $INPUT =~ ^[0-9]{1,9}$ ]]; then
@@ -969,10 +1112,10 @@ while (( ! EXIT_REQUESTED )); do
               MODE=chat
               SCREEN_DIRTY=1
             else
-              echo "Choose a listed chat, n, c, or q."
+              echo "Choose a listed chat, n, g, j, c, or q."
             fi
           else
-            echo "Choose a listed chat, n, c, or q."
+            echo "Choose a listed chat, n, g, j, c, or q."
           fi
           ;;
       esac
@@ -991,6 +1134,24 @@ while (( ! EXIT_REQUESTED )); do
         SCREEN_DIRTY=1
       fi
       ;;
+    create_group)
+      if [[ ${INPUT,,} == /back || ${INPUT,,} == back ]]; then
+        MODE=chats
+        SCREEN_DIRTY=1
+      elif [[ -z $INPUT ]]; then
+        echo "Enter a group name, or /back."
+      else
+        create_group "$INPUT"
+      fi
+      ;;
+    join)
+      if [[ ${INPUT,,} == /back || ${INPUT,,} == back ]]; then
+        MODE=chats
+        SCREEN_DIRTY=1
+      else
+        join_room_with_code "$INPUT"
+      fi
+      ;;
     chat)
       case ${INPUT%% *} in
         /back|back)
@@ -1000,7 +1161,15 @@ while (( ! EXIT_REQUESTED )); do
           ;;
         /help|help)
           echo "Type a message and press Enter to send."
-          echo "/history, /delete NUMBER, /clear, /back"
+          echo "/history, /delete NUMBER, /clear, /settings, /back"
+          ;;
+        /settings)
+          if [[ $CURRENT_CHAT == room:* ]]; then
+            room_settings_menu "${CURRENT_CHAT#room:}"
+          else
+            echo "Room settings are only available inside a group."
+          fi
+          SCREEN_DIRTY=1
           ;;
         /history)
           SCREEN_DIRTY=1

@@ -73,9 +73,14 @@ new Git Bash terminal. This command is available in Git Bash; it does not add
 ## Using the client
 
 After signing in, select a previous chat by number or choose **New chat** and
-enter a registered username. In a conversation, type a message and press Enter
-to send it; use `/back` to return to the chat list. Use **Commands** for room
-management, trust controls, and other client commands.
+enter a registered username. Choose **Create a group** to make a group; it
+opens the new group, where the owner can use `/settings` to create an invite
+code. Others choose **Join group** and enter that code. In a group chat,
+`/settings` opens the administrator panel. Group admins can create/revoke
+invite codes and manage members; only the group owner can assign or remove
+co-admins. New members see messages sent after joining, not earlier group
+history. Use **Commands** for room management, trust controls, and other client
+commands.
 
 Messages are queued by the server while the recipient is offline and delivered
 when they reconnect. Encrypted direct and room-message history is also retained
